@@ -88,18 +88,28 @@ def close_db(_exc):
 
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.executescript(SCHEMA)
-    count = db.execute("SELECT COUNT(*) FROM tabs").fetchone()[0]
-    if count == 0:
-        db.execute(
-            "INSERT INTO tabs (id,title,artist,album,tuning,instrument,difficulty,content,source,created) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            ("demo-1", "Untitled Crawl", "Original / Demo", "-", "Drop A",
-             "Guitar (6-string)", "Intermediate", DEMO_CONTENT, "self", time.time()),
-        )
-    db.commit()
-    db.close()
+    try:
+        # Ensure directory exists
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+        
+        db = sqlite3.connect(DB_PATH)
+        db.executescript(SCHEMA)
+        count = db.execute("SELECT COUNT(*) FROM tabs").fetchone()[0]
+        if count == 0:
+            db.execute(
+                "INSERT INTO tabs (id,title,artist,album,tuning,instrument,difficulty,content,source,created) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("demo-1", "Untitled Crawl", "Original / Demo", "-", "Drop A",
+                 "Guitar (6-string)", "Intermediate", DEMO_CONTENT, "self", time.time()),
+            )
+        db.commit()
+        db.close()
+        print(f"✓ Database initialized at {DB_PATH}")
+    except Exception as e:
+        print(f"✗ Database initialization failed: {e}")
+        # Don't crash - Railway workers will keep retrying
 
 
 # ---- search scoring (validated: exact 100 / prefix 70 / contains 40) ---------
