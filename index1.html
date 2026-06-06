@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0304" />
+<title>TabCrypt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@300;500;700&family=Pirata+One&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #060304; }
+  body { font-family: 'Oswald', -apple-system, Segoe UI, sans-serif; }
+  button, select, input, textarea { font-family: inherit; }
+  #boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+          background: #060304; color: #6a3036; letter-spacing: 4px; font-size: 12px; }
+  @keyframes flickr { 0%,100%{opacity:.96} 50%{opacity:1} }
+  @keyframes pulseRed { 0%,100%{box-shadow:0 0 14px 0 rgba(200,16,46,.5)} 50%{box-shadow:0 0 28px 4px rgba(255,39,64,.75)} }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .tc-grain:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;opacity:.06;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
+  .tc-scroll::-webkit-scrollbar{width:8px;height:8px}
+  .tc-scroll::-webkit-scrollbar-thumb{background:#3a0a10}
+  .tc-scroll::-webkit-scrollbar-track{background:#0a0608}
+  select option { background: #120406; }
+</style>
+</head>
+<body>
+<div id="boot">LOADING THE CRYPT…</div>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ===================== BACKEND ===================== */
+/* Your live Railway service. The library reads/writes here. */
+const API = "https://tabcrypt-production.up.railway.app";
+/* Only needed if you set API_KEY in the Railway Variables tab. Paste it here to add/delete tabs. */
+const API_KEY = "";
+
+async function apiSearch(q, filter){
+  const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&filter=${filter}`);
+  if(!r.ok) throw new Error("search " + r.status);
+  return (await r.json()).results;
+}
+async function apiGetTab(id){
+  const r = await fetch(`${API}/api/tab/${id}`);
+  if(!r.ok) throw new Error("load " + r.status);
+  return await r.json();
+}
+async function apiAddTab(tab){
+  const r = await fetch(`${API}/api/tab`, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json", ...(API_KEY ? {"X-API-Key":API_KEY} : {}) },
+    body: JSON.stringify(tab),
+  });
+  if(!r.ok) throw new Error(r.status === 401 ? "401 unauthorized — set API_KEY in the file" : "save " + r.status);
+  return await r.json();
+}
+async function apiDeleteTab(id){
+  const r = await fetch(`${API}/api/tab/${id}`, {
+    method:"DELETE",
+    headers: API_KEY ? {"X-API-Key":API_KEY} : {},
+  });
+  if(!r.ok) throw new Error(r.status === 401 ? "401 unauthorized — set API_KEY in the file" : "delete " + r.status);
+}
+
+/* ===================== MUSIC THEORY ===================== */
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const FLAT_MAP = { Db:"C#", Eb:"D#", Gb:"F#", Ab:"G#", Bb:"A#" };
+function noteToMidi(note){
+  const m = note.match(/^([A-G])(#|b)?(-?\d+)$/); if(!m) return null;
+  const [,letter,acc,oct] = m;
+  let name = letter + (acc==="#"?"#":"");
+  if(acc==="b") name = FLAT_MAP[letter+"b"]||letter;
+  const idx = NOTE_NAMES.indexOf(name); if(idx<0) return null;
+  return (parseInt(oct,10)+1)*12 + idx;
+}
+function midiToFreq(m){ return 440*Math.pow(2,(m-69)/12); }
+function noteToFreq(n){ const m=noteToMidi(n); return m==null?null:midiToFreq(m); }
+function freqToNote(f){
+  const midi = 69 + 12*Math.log2(f/440);
+  const r = Math.round(midi);
+  const idx = ((r%12)+12)%12, oct = Math.floor(r/12)-1;
+  const cents = Math.round(1200*Math.log2(f/midiToFreq(r)));
+  return { name: NOTE_NAMES[idx]+oct, cents };
+}
+function splitNote(note){ const m=note.match(/^([A-G]#?)(-?\d+)$/); return m?[m[1],m[2]]:[note,""]; }
+
+/* ===================== TUNINGS (low -> high) ===================== */
+const TUNINGS = {
+  "Standard E":        ["E2","A2","D3","G3","B3","E4"],
+  "Eb / Half-step":    ["D#2","G#2","C#3","F#3","A#3","D#4"],
+  "D / Whole-step":    ["D2","G2","C3","F3","A3","D4"],
+  "Drop D":            ["D2","A2","D3","G3","B3","E4"],
+  "Drop C#":           ["C#2","G#2","C#3","F#3","A#3","D#4"],
+  "Drop C":            ["C2","G2","C3","F3","A3","D4"],
+  "Drop B":            ["B1","F#2","B2","E3","G#3","C#4"],
+  "Drop A":            ["A1","E2","A2","D3","F#3","B3"],
+  "C Standard":        ["C2","F2","A#2","D#3","G3","C4"],
+  "B Standard":        ["B1","E2","A2","D3","F#3","B3"],
+  "A Standard":        ["A1","D2","G2","C3","E3","A3"],
+  "7-str Standard B":  ["B1","E2","A2","D3","G3","B3","E4"],
+  "7-str Drop A":      ["A1","E2","A2","D3","G3","B3","E4"],
+  "8-str Standard F#": ["F#1","B1","E2","A2","D3","G3","B3","E4"],
+  "8-str Drop E":      ["E1","B1","E2","A2","D3","G3","B3","E4"],
+};
+
+/* ===================== PITCH DETECTION (validated) ===================== */
+function autoCorrelate(buf, sampleRate){
+  const SIZE = buf.length;
+  let rms=0; for(let i=0;i<SIZE;i++) rms+=buf[i]*buf[i];
+  rms=Math.sqrt(rms/SIZE); if(rms<0.01) return -1;
+  let r1=0,r2=SIZE-1; const thres=0.2;
+  for(let i=0;i<SIZE/2;i++) if(Math.abs(buf[i])<thres){r1=i;break;}
+  for(let i=1;i<SIZE/2;i++) if(Math.abs(buf[SIZE-i])<thres){r2=SIZE-i;break;}
+  const b=buf.slice(r1,r2); const n=b.length; if(n<2) return -1;
+  const c=new Array(n).fill(0);
+  for(let lag=0;lag<n;lag++) for(let i=0;i<n-lag;i++) c[lag]+=b[i]*b[i+lag];
+  let d=0; while(d<n-1 && c[d]>c[d+1]) d++;
+  let maxval=-1,maxpos=-1;
+  for(let i=d;i<n;i++) if(c[i]>maxval){maxval=c[i];maxpos=i;}
+  let T0=maxpos; if(T0<=0) return -1;
+  const x1=c[T0-1],x2=c[T0],x3=c[T0+1];
+  const a=(x1+x3-2*x2)/2, bb=(x3-x1)/2;
+  if(a) T0=T0-bb/(2*a);
+  const freq=sampleRate/T0;
+  if(freq<30||freq>1300) return -1;
+  return freq;
+}
+
+/* ===================== THEME ===================== */
+const RED = "#c8102e";
+const RED_BRIGHT = "#ff2740";
+const glow = (c, blur, spread=0) => `0 0 ${blur}px ${spread}px ${c}`;
+
+/* ===================== ICONS ===================== */
+function Icon({ name, size=18, color="currentColor", style }){
+  const p = { width:size, height:size, viewBox:"0 0 24 24", fill:"none",
+              stroke:color, strokeWidth:2, strokeLinecap:"round", strokeLinejoin:"round", style };
+  switch(name){
+    case "mic": return (<svg {...p}><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>);
+    case "micoff": return (<svg {...p}><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="3" y1="3" x2="21" y2="21"/></svg>);
+    case "volume": return (<svg {...p}><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M19 5a9 9 0 0 1 0 14"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>);
+    case "search": return (<svg {...p}><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>);
+    case "plus": return (<svg {...p}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>);
+    case "x": return (<svg {...p}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>);
+    case "trash": return (<svg {...p}><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>);
+    case "repeat": return (<svg {...p}><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>);
+    case "chevron": return (<svg {...p}><path d="M9 6l6 6-6 6"/></svg>);
+    case "crosshair": return (<svg {...p}><circle cx="12" cy="12" r="9"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>);
+    case "music": return (<svg {...p}><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>);
+    case "list": return (<svg {...p}><path d="M3 6h12"/><path d="M3 12h9"/><path d="M3 18h7"/><circle cx="19" cy="16" r="2"/><path d="M21 16V8"/></svg>);
+    case "skull": return (<svg {...p}><path d="M12 2C7 2 4 5.5 4 10c0 2.6 1.2 4.2 2.6 5.2V18a2 2 0 0 0 2 2h.4v-2.2h1.4V20h1.2v-2.2h1.4V20h.4a2 2 0 0 0 2-2v-2.8C18.8 14.2 20 12.6 20 10c0-4.5-3-8-8-8z"/><circle cx="9" cy="10.5" r="1.6" fill={color} stroke="none"/><circle cx="15" cy="10.5" r="1.6" fill={color} stroke="none"/></svg>);
+    default: return null;
+  }
+}
+
+/* ===================== APP ===================== */
+function App(){
+  const [view, setView] = useState("tuner");
+  const [tuningName, setTuningName] = useState("Drop A");
+  const strings = TUNINGS[tuningName];
+
+  return (
+    <div className="tc-grain tc-scroll" style={{
+      minHeight:"100vh",
+      background:"radial-gradient(120% 80% at 50% -10%, #2a0509 0%, #120406 38%, #060304 100%)",
+      color:"#e7dcd0", animation:"flickr 6s ease-in-out infinite",
+    }}>
+      <header style={{borderBottom:`1px solid ${RED}55`,background:"linear-gradient(180deg,#150305 0%,#0b0203 100%)",boxShadow:glow(RED+"22",30)}}>
+        <div style={{maxWidth:760,margin:"0 auto",padding:"14px 16px",display:"flex",alignItems:"center",gap:12}}>
+          <Icon name="skull" size={30} color={RED_BRIGHT} style={{filter:`drop-shadow(${glow(RED,10)})`}} />
+          <div style={{lineHeight:1}}>
+            <div style={{fontFamily:"'Pirata One',serif",fontSize:30,letterSpacing:1,color:"#f3e9dd",textShadow:`${glow(RED,18)}, 0 2px 0 #000`}}>
+              TAB<span style={{color:RED_BRIGHT}}>CRYPT</span>
+            </div>
+            <div style={{fontSize:10,letterSpacing:4,textTransform:"uppercase",color:"#8a6b6f",marginTop:2}}>tuner · tablature vault</div>
+          </div>
+        </div>
+        <nav style={{maxWidth:760,margin:"0 auto",display:"flex"}}>
+          {[["tuner","TUNER","crosshair"],["tabs","TABS","list"]].map(([key,label,icon])=>{
+            const active = view===key;
+            return (
+              <button key={key} onClick={()=>setView(key)} style={{
+                flex:1,padding:"12px 0",background:"transparent",border:"none",cursor:"pointer",
+                display:"flex",alignItems:"center",justifyContent:"center",gap:7,
+                fontSize:13,fontWeight:700,letterSpacing:3,color:active?RED_BRIGHT:"#7a5f63",
+                borderBottom:active?`2px solid ${RED_BRIGHT}`:"2px solid transparent",textShadow:active?glow(RED,12):"none",
+              }}>
+                <Icon name={icon} size={15} />{label}
+              </button>
+            );
+          })}
+        </nav>
+      </header>
+
+      <main style={{maxWidth:760,margin:"0 auto",padding:"18px 16px 60px"}}>
+        {view==="tuner"
+          ? <Tuner tuningName={tuningName} setTuningName={setTuningName} strings={strings} />
+          : <Library setTuningName={setTuningName} setView={setView} />}
+      </main>
+
+      <footer style={{textAlign:"center",padding:"10px 0 26px",fontSize:10,letterSpacing:3,color:"#5a4448"}}>
+        CONNECTED · LIBRARY SYNCS ACROSS DEVICES VIA YOUR SERVER
+      </footer>
+    </div>
+  );
+}
+
+/* ===================== TUNER (fully client-side) ===================== */
+function Tuner({ tuningName, setTuningName, strings }){
+  const [mode, setMode] = useState("mic");
+  const [listening, setListening] = useState(false);
+  const [micErr, setMicErr] = useState("");
+  const [detected, setDetected] = useState(null);
+  const [selStr, setSelStr] = useState(0);
+  const [repeat, setRepeat] = useState(false);
+
+  const ctxRef=useRef(null), analyserRef=useRef(null), streamRef=useRef(null);
+  const rafRef=useRef(null), bufRef=useRef(null), histRef=useRef([]);
+  const toneCtxRef=useRef(null), toneStopRef=useRef(null), repeatTimerRef=useRef(null);
+
+  const stopMic = useCallback(()=>{
+    if(rafRef.current) cancelAnimationFrame(rafRef.current);
+    if(streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop());
+    if(ctxRef.current && ctxRef.current.state!=="closed") ctxRef.current.close();
+    rafRef.current=null; streamRef.current=null; ctxRef.current=null; analyserRef.current=null;
+    histRef.current=[]; setListening(false); setDetected(null);
+  },[]);
+
+  const loop = useCallback(()=>{
+    const analyser=analyserRef.current, ctx=ctxRef.current;
+    if(!analyser||!ctx) return;
+    analyser.getFloatTimeDomainData(bufRef.current);
+    const f=autoCorrelate(bufRef.current, ctx.sampleRate);
+    if(f>0){
+      const h=histRef.current; h.push(f); if(h.length>6) h.shift();
+      const sorted=[...h].sort((a,b)=>a-b); const med=sorted[Math.floor(sorted.length/2)];
+      let best=0,bestD=Infinity;
+      strings.forEach((s,i)=>{ const sf=noteToFreq(s); const dd=Math.abs(1200*Math.log2(med/sf)); if(dd<bestD){bestD=dd;best=i;} });
+      const target=noteToFreq(strings[best]);
+      const cents=Math.round(1200*Math.log2(med/target));
+      setDetected({ freq:med, note:freqToNote(med).name, cents, nearestIdx:best });
+    }
+    rafRef.current=requestAnimationFrame(loop);
+  },[strings]);
+
+  const startMic = useCallback(async()=>{
+    setMicErr("");
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,autoGainControl:false,noiseSuppression:false}});
+      streamRef.current=stream;
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      const ctx=new Ctx(); ctxRef.current=ctx; if(ctx.state==="suspended") ctx.resume();
+      const src=ctx.createMediaStreamSource(stream);
+      const analyser=ctx.createAnalyser(); analyser.fftSize=2048;
+      bufRef.current=new Float32Array(analyser.fftSize);
+      src.connect(analyser); analyserRef.current=analyser;
+      setListening(true); rafRef.current=requestAnimationFrame(loop);
+    }catch(e){
+      setMicErr(e&&e.name==="NotAllowedError"
+        ? "Mic access denied. Allow microphone permission, or use TONE mode below."
+        : "Mic unavailable here. Use TONE mode below (works everywhere).");
+    }
+  },[loop]);
+
+  const playTone = useCallback((freq)=>{
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!toneCtxRef.current||toneCtxRef.current.state==="closed") toneCtxRef.current=new Ctx();
+    const ctx=toneCtxRef.current; if(ctx.state==="suspended") ctx.resume();
+    if(toneStopRef.current){ try{toneStopRef.current();}catch{} }
+    const t=ctx.currentTime;
+    const master=ctx.createGain(); master.connect(ctx.destination);
+    master.gain.setValueAtTime(0.0001,t);
+    master.gain.exponentialRampToValueAtTime(0.5,t+0.02);
+    master.gain.exponentialRampToValueAtTime(0.0008,t+2.4);
+    const parts=[[freq,1,"triangle"],[freq*2,0.28,"sine"],[freq*3,0.12,"sine"]];
+    const oscs=parts.map(([fr,g,type])=>{
+      const o=ctx.createOscillator(), og=ctx.createGain();
+      o.type=type; o.frequency.value=fr; og.gain.value=g;
+      o.connect(og); og.connect(master); o.start(t); o.stop(t+2.5);
+      return o;
+    });
+    toneStopRef.current=()=>oscs.forEach(o=>{try{o.stop();}catch{}});
+  },[]);
+
+  const pluckSelected = useCallback(()=>{ playTone(noteToFreq(strings[selStr])); },[playTone,strings,selStr]);
+
+  useEffect(()=>{
+    if(repeat && mode==="tone"){ pluckSelected(); repeatTimerRef.current=setInterval(pluckSelected,2600); }
+    return ()=>{ if(repeatTimerRef.current) clearInterval(repeatTimerRef.current); };
+  },[repeat,mode,selStr,pluckSelected]);
+
+  useEffect(()=>()=>{
+    stopMic();
+    if(repeatTimerRef.current) clearInterval(repeatTimerRef.current);
+    if(toneCtxRef.current && toneCtxRef.current.state!=="closed") toneCtxRef.current.close();
+  },[stopMic]);
+
+  useEffect(()=>{ setSelStr(s=>Math.min(s,strings.length-1)); },[strings.length]);
+
+  const activeIdx = mode==="mic" ? (detected?detected.nearestIdx:-1) : selStr;
+  const cents = mode==="mic" && detected ? detected.cents : 0;
+  const inTune = mode==="mic" && detected && Math.abs(detected.cents)<=5;
+  const targetNote = activeIdx>=0 ? strings[activeIdx] : strings[selStr];
+  const [tn,to] = splitNote(targetNote);
+
+  return (
+    <div>
+      <TuningPicker tuningName={tuningName} setTuningName={setTuningName} />
+      <div style={{display:"flex",gap:8,marginBottom:16}}>
+        {[["mic","MIC DETECT","mic"],["tone","REFERENCE TONE","volume"]].map(([key,label,icon])=>{
+          const on=mode===key;
+          return (
+            <button key={key} onClick={()=>{ if(key!=="mic"&&listening) stopMic(); if(key==="tone") setRepeat(false); setMode(key); }} style={{
+              flex:1,padding:"10px 6px",cursor:"pointer",background:on?RED+"1f":"#0e0507",
+              border:`1px solid ${on?RED:"#3a1116"}`,color:on?"#fff":"#8a6b6f",
+              fontSize:12,fontWeight:700,letterSpacing:2,display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+              boxShadow:on?glow(RED+"44",16):"none",
+            }}>
+              <Icon name={icon} size={15} />{label}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{background:"linear-gradient(180deg,#140406,#0a0304)",border:`1px solid ${RED}44`,padding:"22px 16px 18px",textAlign:"center",position:"relative",overflow:"hidden",boxShadow:inTune?glow("#1f9d55aa",26):glow(RED+"22",20)}}>
+        <div style={{fontSize:11,letterSpacing:4,color:"#8a6b6f",textTransform:"uppercase"}}>
+          {mode==="mic" ? (listening?"listening…":"tap mic to start") : "target string"}
+        </div>
+        <div style={{display:"flex",alignItems:"baseline",justifyContent:"center",gap:4,margin:"4px 0 2px"}}>
+          <span style={{fontFamily:"'Pirata One',serif",fontSize:92,lineHeight:1,color:inTune?"#3ee07a":"#f4ece1",textShadow:inTune?glow("#1f9d55",26):glow(RED,22)}}>{tn}</span>
+          <span style={{fontSize:30,color:"#8a6b6f",fontWeight:300}}>{to}</span>
+        </div>
+        {mode==="mic" && (
+          <div style={{fontSize:12,color:"#9c7c80",minHeight:16}}>
+            {detected ? <>heard <b style={{color:"#cdbfb3"}}>{detected.note}</b> · {detected.freq.toFixed(1)} Hz · {cents>0?"+":""}{cents}&cent;</> : "—"}
+          </div>
+        )}
+        <Meter cents={mode==="mic"?cents:0} active={mode==="mic"&&!!detected} inTune={inTune} />
+        <div style={{marginTop:8,fontSize:14,fontWeight:700,letterSpacing:3,minHeight:20}}>
+          {mode==="mic" && detected
+            ? (inTune
+                ? <span style={{color:"#3ee07a",textShadow:glow("#1f9d55",10)}}>IN TUNE</span>
+                : <span style={{color:RED_BRIGHT}}>{cents<0?"♭  TOO LOW — TIGHTEN":"TOO HIGH — LOOSEN  ♯"}</span>)
+            : <span style={{color:"#6a5256"}}>{mode==="tone"?"TAP A STRING TO HEAR IT":""}</span>}
+        </div>
+      </div>
+
+      {mode==="mic" ? (
+        <button onClick={listening?stopMic:startMic} style={{
+          width:"100%",marginTop:12,padding:"14px",cursor:"pointer",background:listening?"#1a0608":RED,color:"#fff",
+          border:`1px solid ${listening?RED:RED_BRIGHT}`,fontSize:15,fontWeight:700,letterSpacing:3,
+          display:"flex",alignItems:"center",justifyContent:"center",gap:10,animation:listening?"pulseRed 1.8s ease-in-out infinite":"none",
+        }}>
+          <Icon name={listening?"micoff":"mic"} size={18} />{listening?"STOP":"START MIC"}
+        </button>
+      ) : (
+        <button onClick={()=>setRepeat(r=>!r)} style={{
+          width:"100%",marginTop:12,padding:"14px",cursor:"pointer",background:repeat?RED:"#1a0608",color:"#fff",
+          border:`1px solid ${RED_BRIGHT}`,fontSize:15,fontWeight:700,letterSpacing:3,
+          display:"flex",alignItems:"center",justifyContent:"center",gap:10,animation:repeat?"pulseRed 2.4s ease-in-out infinite":"none",
+        }}>
+          <Icon name="repeat" size={18} />{repeat?"REPEAT ON — LOOPING":"REPEAT TUNE"}
+        </button>
+      )}
+
+      {micErr && (
+        <div style={{marginTop:10,padding:"10px 12px",border:`1px solid ${RED}66`,background:RED+"12",color:"#e9bcc0",fontSize:13}}>{micErr}</div>
+      )}
+
+      <Fretboard strings={strings} activeIdx={activeIdx} inTune={inTune} mode={mode}
+        onPick={(i)=>{ if(mode==="tone"){ setSelStr(i); setRepeat(false); playTone(noteToFreq(strings[i])); } }} />
+    </div>
+  );
+}
+
+function TuningPicker({ tuningName, setTuningName }){
+  return (
+    <div style={{marginBottom:14}}>
+      <label style={{fontSize:10,letterSpacing:3,color:"#8a6b6f",textTransform:"uppercase"}}>Tuning</label>
+      <div style={{position:"relative",marginTop:6}}>
+        <select value={tuningName} onChange={(e)=>setTuningName(e.target.value)} style={{
+          width:"100%",appearance:"none",WebkitAppearance:"none",background:"#0e0507",color:"#f0e7db",
+          border:`1px solid ${RED}55`,padding:"12px 38px 12px 14px",fontSize:15,fontWeight:500,letterSpacing:1,cursor:"pointer",
+        }}>
+          {Object.entries(TUNINGS).map(([name,ns])=>(<option key={name} value={name}>{name} — {ns.map(n=>splitNote(n)[0]).join(" ")}</option>))}
+        </select>
+        <Icon name="chevron" size={18} color={RED_BRIGHT} style={{position:"absolute",right:12,top:13,transform:"rotate(90deg)",pointerEvents:"none"}} />
+      </div>
+    </div>
+  );
+}
+
+function Meter({ cents, active, inTune }){
+  const clamped=Math.max(-50,Math.min(50,cents));
+  const pct=((clamped+50)/100)*100;
+  return (
+    <div style={{margin:"12px auto 2px",maxWidth:380,position:"relative"}}>
+      <div style={{position:"relative",height:46}}>
+        <div style={{position:"absolute",top:18,left:0,right:0,height:4,background:"#2a0c11"}} />
+        <div style={{position:"absolute",top:16,left:"calc(50% - 14px)",width:28,height:8,background:"#0f3b22",border:"1px solid #1f9d5566"}} />
+        {[-50,-25,0,25,50].map(v=>(<div key={v} style={{position:"absolute",top:8,left:`calc(${((v+50)/100)*100}% - 0.5px)`,width:1,height:v===0?24:14,background:v===0?"#1f9d55":"#5a2a30"}} />))}
+        {active && (<div style={{position:"absolute",top:2,left:`calc(${pct}% - 1.5px)`,width:3,height:36,background:inTune?"#3ee07a":RED_BRIGHT,boxShadow:glow(inTune?"#1f9d55":RED,12),transition:"left 90ms linear"}} />)}
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#6a5256",letterSpacing:1,marginTop:-2}}>
+        <span>♭ -50</span><span>0</span><span>+50 ♯</span>
+      </div>
+    </div>
+  );
+}
+
+function Fretboard({ strings, activeIdx, inTune, mode, onPick }){
+  const n=strings.length;
+  const rows=strings.map((s,i)=>({note:s,idx:i})).reverse();
+  return (
+    <div style={{marginTop:18}}>
+      <div style={{fontSize:10,letterSpacing:3,color:"#8a6b6f",textTransform:"uppercase",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+        <Icon name="music" size={13} color={RED} /> Mini neck — {mode==="tone"?"tap a string":"active string highlighted"}
+      </div>
+      <div style={{background:"linear-gradient(90deg,#1a0d07,#2a160c 50%,#1a0d07)",border:`1px solid ${RED}33`,padding:"14px 12px",position:"relative",overflow:"hidden",boxShadow:"inset 0 0 30px #000"}}>
+        <div style={{position:"absolute",left:64,top:0,bottom:0,width:4,background:"#d8c7a0",boxShadow:"0 0 8px #000"}} />
+        {rows.map(({note,idx})=>{
+          const isActive=idx===activeIdx;
+          const thickness=1.4+idx*0.85;
+          const [nm,oc]=splitNote(note);
+          const lineColor=isActive ? (inTune&&mode==="mic"?"#3ee07a":RED_BRIGHT) : "#9a8e7a";
+          return (
+            <button key={idx} onClick={()=>onPick(idx)} disabled={mode!=="tone"} style={{display:"flex",alignItems:"center",width:"100%",background:"transparent",border:"none",padding:"9px 0",cursor:mode==="tone"?"pointer":"default"}}>
+              <div style={{width:56,flexShrink:0,textAlign:"center",fontFamily:"ui-monospace,Menlo,monospace",fontWeight:700,fontSize:17,color:isActive?"#fff":"#b8aa96",textShadow:isActive?glow(inTune&&mode==="mic"?"#1f9d55":RED,12):"none"}}>
+                {nm}<span style={{fontSize:10,color:"#7a6f5e"}}>{oc}</span>
+              </div>
+              <div style={{flex:1,position:"relative",height:Math.max(thickness,12),display:"flex",alignItems:"center"}}>
+                <div style={{width:"100%",height:thickness,background:isActive?`linear-gradient(90deg, ${lineColor}, #fff5, ${lineColor})`:"linear-gradient(90deg,#6b6051,#cbbfa6,#6b6051)",boxShadow:isActive?glow(lineColor,12):"none",borderRadius:2}} />
+                {isActive && (<div style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",width:12,height:12,borderRadius:"50%",background:inTune&&mode==="mic"?"#3ee07a":RED_BRIGHT,boxShadow:glow(inTune&&mode==="mic"?"#1f9d55":RED,14)}} />)}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{fontSize:10,color:"#6a5256",marginTop:6,letterSpacing:1}}>{n} strings · thickest = lowest pitch</div>
+    </div>
+  );
+}
+
+/* ===================== STATUS LIGHT ===================== */
+function StatusDot({ status }){
+  const map = {
+    connecting:["#e0a83e","connecting…","blink 1s ease-in-out infinite"],
+    live:["#3ee07a","live",""],
+    offline:[RED_BRIGHT,"offline",""],
+  };
+  const [c,label,anim]=map[status]||map.connecting;
+  return (
+    <span style={{display:"inline-flex",alignItems:"center",gap:5,color:c,letterSpacing:2}}>
+      <span style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:glow(c,8),animation:anim}} />{label}
+    </span>
+  );
+}
+
+/* ===================== LIBRARY (server-backed) ===================== */
+function Library({ setTuningName, setView }){
+  const [results,setResults]=useState([]);
+  const [status,setStatus]=useState("connecting");
+  const [error,setError]=useState("");
+  const [query,setQuery]=useState("");
+  const [filter,setFilter]=useState("all");
+  const [open,setOpen]=useState(null);
+  const [adding,setAdding]=useState(false);
+
+  const runSearch = useCallback(async()=>{
+    try{
+      const res=await apiSearch(query,filter);
+      setResults(res); setStatus("live"); setError("");
+    }catch(e){
+      setStatus("offline"); setError(String(e.message||e)); setResults([]);
+    }
+  },[query,filter]);
+
+  useEffect(()=>{ const id=setTimeout(runSearch,250); return ()=>clearTimeout(id); },[runSearch]);
+
+  async function openTab(item){
+    try{ const full=await apiGetTab(item.id); setOpen(full); }
+    catch(e){ setOpen({...item, content:"(could not load tab: "+(e.message||e)+")"}); }
+  }
+  async function addTab(tab){ await apiAddTab(tab); setAdding(false); runSearch(); } // throws on fail -> AddTab shows it
+  async function delTab(id){
+    try{ await apiDeleteTab(id); setOpen(null); runSearch(); }
+    catch(e){ setError("Delete failed: "+(e.message||e)); setOpen(null); }
+  }
+
+  const FILTERS=[["all","All"],["song","Song"],["artist","Artist"],["album","Album"],["tuning","Tuning"],["instrument","Instrument"]];
+
+  return (
+    <div>
+      <div style={{position:"relative"}}>
+        <Icon name="search" size={18} color={RED} style={{position:"absolute",left:12,top:13}} />
+        <input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Search the vault…" style={{
+          width:"100%",background:"#0e0507",color:"#f0e7db",border:`1px solid ${RED}55`,padding:"12px 14px 12px 40px",fontSize:15,letterSpacing:1,
+        }} />
+      </div>
+
+      <div style={{display:"flex",flexWrap:"wrap",gap:6,margin:"10px 0 12px"}}>
+        {FILTERS.map(([key,label])=>{
+          const on=filter===key;
+          return (
+            <button key={key} onClick={()=>setFilter(key)} style={{
+              padding:"7px 12px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1,
+              background:on?RED:"#0e0507",color:on?"#fff":"#8a6b6f",border:`1px solid ${on?RED_BRIGHT:"#3a1116"}`,boxShadow:on?glow(RED+"55",12):"none",
+            }}>{label}</button>
+          );
+        })}
+        <button onClick={()=>setAdding(true)} style={{
+          padding:"7px 12px",cursor:"pointer",fontSize:12,fontWeight:700,letterSpacing:1,marginLeft:"auto",
+          background:"#0e0507",color:RED_BRIGHT,border:`1px solid ${RED}`,display:"flex",alignItems:"center",gap:5,
+        }}><Icon name="plus" size={14} /> ADD TAB</button>
+      </div>
+
+      <div style={{fontSize:10,letterSpacing:3,color:"#6a5256",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span>{results.length} RESULT{results.length===1?"":"S"} · SORTED BY MATCH</span>
+        <StatusDot status={status} />
+      </div>
+
+      {status==="offline" && (
+        <div style={{marginBottom:12,padding:"10px 12px",border:`1px solid ${RED}66`,background:RED+"12",color:"#e9bcc0",fontSize:12.5,lineHeight:1.5}}>
+          Cannot reach the backend ({error}). The tuner still works. Check that Railway is running, that the URL at the top of this file is right, and (if you set one) that API_KEY matches.
+        </div>
+      )}
+
+      {status==="live" && results.length===0 ? (
+        <div style={{padding:30,textAlign:"center",color:"#7a5f63",border:`1px dashed ${RED}33`,fontSize:14}}>
+          Nothing matches. Add a tab with <b style={{color:RED_BRIGHT}}>ADD TAB</b>.
+        </div>
+      ) : (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {results.map(t=>(
+            <button key={t.id} onClick={()=>openTab(t)} style={{textAlign:"left",background:"linear-gradient(90deg,#130406,#0c0304)",border:`1px solid ${RED}33`,padding:"13px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:17,fontWeight:700,color:"#f0e7db",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.title}</div>
+                <div style={{fontSize:12,color:"#9c7c80",marginTop:2}}>{t.artist}{t.album&&t.album!=="-"?` · ${t.album}`:""}</div>
+                <div style={{display:"flex",gap:6,marginTop:7,flexWrap:"wrap"}}>
+                  <Pill>{t.tuning}</Pill><Pill muted>{t.instrument}</Pill>{t.difficulty&&<Pill muted>{t.difficulty}</Pill>}
+                </div>
+              </div>
+              <Icon name="chevron" size={20} color={RED} style={{flexShrink:0}} />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {open && (
+        <TabViewer tab={open} onClose={()=>setOpen(null)} onDelete={()=>delTab(open.id)}
+          onTune={()=>{ if(TUNINGS[open.tuning]) setTuningName(open.tuning); setView("tuner"); }}
+          canTune={!!TUNINGS[open.tuning]} />
+      )}
+      {adding && <AddTab onAdd={addTab} onClose={()=>setAdding(false)} />}
+    </div>
+  );
+}
+
+function Pill({ children, muted }){
+  return (<span style={{fontSize:10,letterSpacing:1,padding:"3px 8px",textTransform:"uppercase",background:muted?"#1a0a0d":RED+"1f",color:muted?"#9c7c80":"#f0c9cd",border:`1px solid ${muted?"#3a1116":RED+"66"}`}}>{children}</span>);
+}
+
+function TabViewer({ tab, onClose, onDelete, onTune, canTune }){
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:4}}>
+        <div style={{flex:1}}>
+          <div style={{fontFamily:"'Pirata One',serif",fontSize:26,color:"#f4ece1",textShadow:glow(RED,14)}}>{tab.title}</div>
+          <div style={{fontSize:13,color:"#9c7c80",marginTop:2}}>{tab.artist}{tab.album&&tab.album!=="-"?` · ${tab.album}`:""}</div>
+        </div>
+        <button onClick={onClose} style={iconBtn}><Icon name="x" size={20} color="#cdbfb3" /></button>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",margin:"8px 0 12px"}}>
+        <Pill>{tab.tuning}</Pill><Pill muted>{tab.instrument}</Pill>{tab.difficulty&&<Pill muted>{tab.difficulty}</Pill>}
+      </div>
+      <div className="tc-scroll" style={{background:"#070202",border:`1px solid ${RED}33`,padding:12,overflowX:"auto",maxHeight:"46vh"}}>
+        <pre style={{margin:0,fontFamily:"ui-monospace,Menlo,Consolas,monospace",fontSize:12.5,lineHeight:1.55,color:"#cde0c9",whiteSpace:"pre"}}>{tab.content}</pre>
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:14}}>
+        <button onClick={onTune} disabled={!canTune} style={{flex:1,padding:"12px",cursor:canTune?"pointer":"not-allowed",background:canTune?RED:"#1a0608",color:"#fff",border:`1px solid ${RED_BRIGHT}`,fontSize:13,fontWeight:700,letterSpacing:2,display:"flex",alignItems:"center",justifyContent:"center",gap:8,opacity:canTune?1:0.5}}>
+          <Icon name="crosshair" size={16} /> {canTune?"TUNE TO THIS":"TUNING NOT PRESET"}
+        </button>
+        <button onClick={onDelete} style={{padding:"12px 16px",cursor:"pointer",background:"#0e0507",color:RED_BRIGHT,border:`1px solid ${RED}66`}}><Icon name="trash" size={18} /></button>
+      </div>
+    </Overlay>
+  );
+}
+
+function AddTab({ onAdd, onClose }){
+  const [f,setF]=useState({title:"",artist:"",album:"",tuning:"Standard E",instrument:"Guitar (6-string)",difficulty:"Intermediate",content:"",source:"user"});
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+  const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
+  const valid=f.title.trim()&&f.content.trim();
+  const submit=async()=>{ if(!valid||busy) return; setErr(""); setBusy(true); try{ await onAdd(f); }catch(e){ setErr(String(e.message||e)); setBusy(false); } };
+  const inp={width:"100%",background:"#070202",color:"#f0e7db",border:`1px solid ${RED}44`,padding:"10px 12px",fontSize:14,marginTop:4};
+  const lab={fontSize:10,letterSpacing:2,color:"#8a6b6f",textTransform:"uppercase"};
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+        <div style={{fontFamily:"'Pirata One',serif",fontSize:24,color:"#f4ece1",flex:1,textShadow:glow(RED,12)}}>Add to the Vault</div>
+        <button onClick={onClose} style={iconBtn}><Icon name="x" size={20} color="#cdbfb3" /></button>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:11}}>
+        <div><div style={lab}>Song *</div><input style={inp} value={f.title} onChange={set("title")} placeholder="Song title" /></div>
+        <div style={{display:"flex",gap:10}}>
+          <div style={{flex:1}}><div style={lab}>Artist</div><input style={inp} value={f.artist} onChange={set("artist")} /></div>
+          <div style={{flex:1}}><div style={lab}>Album</div><input style={inp} value={f.album} onChange={set("album")} /></div>
+        </div>
+        <div style={{display:"flex",gap:10}}>
+          <div style={{flex:1}}>
+            <div style={lab}>Tuning</div>
+            <select style={inp} value={f.tuning} onChange={set("tuning")}>{Object.keys(TUNINGS).map(t=><option key={t}>{t}</option>)}<option>Other</option></select>
+          </div>
+          <div style={{flex:1}}>
+            <div style={lab}>Instrument</div>
+            <select style={inp} value={f.instrument} onChange={set("instrument")}>{["Guitar (6-string)","Guitar (7-string)","Guitar (8-string)","Bass (4)","Bass (5)","Bass (6)","Other"].map(t=><option key={t}>{t}</option>)}</select>
+          </div>
+        </div>
+        <div>
+          <div style={lab}>Difficulty</div>
+          <select style={inp} value={f.difficulty} onChange={set("difficulty")}>{["Beginner","Intermediate","Advanced","Expert"].map(t=><option key={t}>{t}</option>)}</select>
+        </div>
+        <div>
+          <div style={lab}>Tab (ASCII / your own transcription) *</div>
+          <textarea style={{...inp,minHeight:150,fontFamily:"ui-monospace,monospace",fontSize:12.5,whiteSpace:"pre",lineHeight:1.5}} value={f.content} onChange={set("content")} placeholder={"e|---0---2---|\nB|---1---3---|"} />
+        </div>
+      </div>
+      {err && <div style={{marginTop:12,padding:"9px 12px",border:`1px solid ${RED}66`,background:RED+"12",color:"#e9bcc0",fontSize:12.5}}>Could not save: {err}</div>}
+      <button onClick={submit} disabled={!valid||busy} style={{width:"100%",marginTop:14,padding:"13px",cursor:(valid&&!busy)?"pointer":"not-allowed",background:(valid&&!busy)?RED:"#1a0608",color:"#fff",border:`1px solid ${RED_BRIGHT}`,fontSize:14,fontWeight:700,letterSpacing:3,opacity:(valid&&!busy)?1:0.5}}>
+        {busy?"SAVING…":"SAVE TO VAULT"}
+      </button>
+    </Overlay>
+  );
+}
+
+function Overlay({ children, onClose }){
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,zIndex:100,background:"rgba(2,1,1,0.82)",display:"flex",alignItems:"flex-end",justifyContent:"center",backdropFilter:"blur(2px)"}}>
+      <div onClick={(e)=>e.stopPropagation()} className="tc-scroll" style={{width:"100%",maxWidth:760,maxHeight:"92vh",overflowY:"auto",background:"linear-gradient(180deg,#160406,#0a0304)",border:`1px solid ${RED}66`,borderBottom:"none",boxShadow:glow(RED+"44",40),padding:"18px 16px 26px"}}>{children}</div>
+    </div>
+  );
+}
+
+const iconBtn={background:"#0e0507",border:`1px solid ${RED}44`,padding:7,cursor:"pointer",flexShrink:0};
+
+/* ===================== MOUNT ===================== */
+const boot=document.getElementById("boot"); if(boot) boot.remove();
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
