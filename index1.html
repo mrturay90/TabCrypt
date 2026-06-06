@@ -38,7 +38,31 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 /* ===================== BACKEND ===================== */
 /* Your live Railway service. The library reads/writes here. */
-const API = process.env.REACT_APP_API_URL || "https://tabcrypt-production.up.railway.app";
+const API = (() => {
+  const url = process.env.REACT_APP_API_URL;
+  
+  if (!url) {
+    console.warn(
+      "⚠️ REACT_APP_API_URL not set. Defaulting to localhost. " +
+      "This should only happen in development."
+    );
+    return "http://localhost:3000";
+  }
+  
+  // Validate it's actually a URL
+  try {
+    new URL(url);
+  } catch {
+    throw new Error(`Invalid REACT_APP_API_URL: "${url}" is not a valid URL`);
+  }
+  
+  // Warn if not HTTPS in production
+  if (url.startsWith("http://") && !url.includes("localhost")) {
+    console.warn("⚠️ Using HTTP for API. Consider HTTPS for production.");
+  }
+  
+  return url;
+})();
 /* Only needed if you set API_KEY in the Railway Variables tab. Paste it here to add/delete tabs. */
 const API_KEY = "";
 
